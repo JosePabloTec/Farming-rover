@@ -1,4 +1,11 @@
+#include <Arduino.h>
 #include <AFMotor.h>
+
+const int TRIG = A0;
+const int ECHO = A1;
+const float Kp = 4.0;
+const int MAX_SPEED = 255;
+const int MIN_SPEED = 75;
 
 
 // M1 es delantera izquierda
@@ -14,13 +21,18 @@ AF_DCMotor motor4(4);
 
 void setup() {
 
-  // Velocidad de los motores: 0 - 255
+  // Initial  motor speed
   motor1.setSpeed(200);
   motor2.setSpeed(200);
   motor3.setSpeed(200);
   motor4.setSpeed(200);
 
-  // Espera inicial de 10 segundos
+  Serial.begin(9600);
+  pinMode(TRIG, OUTPUT);
+  pinMode(ECHO, INPUT);
+  digitalWrite(TRIG, LOW);
+
+  // 100 second delay to protet your computer
   delay(10000);
 }
 
@@ -50,18 +62,57 @@ void stopmotors(){
 }
 
 
+float getDistance() {
+
+  digitalWrite(TRIG, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG, LOW);
+  long duration = pulseIn(ECHO, HIGH, 30000);
+
+  if (duration == 0) {
+    Serial.println("NO ECHO");
+    return -1;
+  }
+
+  float distance = duration * 0.0343 / 2;
+  Serial.print("Distance: ");
+  Serial.print(distance);
+  Serial.println(" cm");
+  return distance;
+}
+
+
 void loop() {
 
-  forward();
-  delay(1000);
+  float distance = getDistance();
 
-  stopmotors();
-  delay(1000);
+  if (distance > 0) {
 
-  rotate();
-  delay(1000);
+    // P controller
+    int velocity = Kp * distance;
 
-  stopmotors();
-  delay(1000);
+    // Limit velocity between 75 and 255
+    velocity = constrain(velocity, MIN_SPEED, MAX_SPEED);
+
+    // Set motor velocity
+    motor1.setSpeed(velocity);
+    motor2.setSpeed(velocity);
+    motor3.setSpeed(velocity);
+    motor4.setSpeed(velocity);
+    Serial.print("Velocity: ");
+    Serial.println(velocity);
+
+    if (velocity == MIN_SPEED){
+      stopmotors();
+    }
+
+
+    else{
+      forward();
+    }
+
+  delay(20);
   
 }
