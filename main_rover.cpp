@@ -1,5 +1,32 @@
 #include <Arduino.h>
 #include <AFMotor.h>
+#include <Wire.h>
+
+#define MPU6050 0x68
+
+// =====================================================
+// Gyroscope
+// =====================================================
+
+float ax, ay, az;
+
+float vx = 0;
+float vy = 0;
+float vz = 0;
+
+float px = 0;
+float py = 0;
+float pz = 0;
+
+float gx, gy, gz;
+
+float roll = 0;
+float pitch = 0;
+float yaw = 0;
+
+unsigned long gyroPreviousTime;
+float gyroDt;
+
 
 // =====================================================
 // Ultrasonic sensor
@@ -16,9 +43,13 @@ const int ECHO = A1;
 const float Kp = 4.0;
 const float Ki = 0.5;
 
+
+// =====================================================
+// Motor limits
+// =====================================================
+
 const int MAX_SPEED = 255;
 
-// Maximum allowed integral contribution
 const float INTEGRAL_LIMIT = 100.0;
 
 
@@ -26,10 +57,11 @@ const float INTEGRAL_LIMIT = 100.0;
 // Goal parameters
 // =====================================================
 
-const float interval = 50.0;     // Distance between goals [cm]
-const float threshold = 5.0;     // Target tolerance [cm]
+const float interval = 50.0;
+const float threshold = 5.0;
 
-const unsigned long STOP_TIME = 5000;  // 5 seconds
+const unsigned long STOP_TIME = 3000;
+const unsigned long ROTATE_TIME = 750;
 
 
 // =====================================================
@@ -61,9 +93,22 @@ bool target_reached = false;
 
 int goal_number = 1;
 
-
-// Time used for integral
 unsigned long previousTime;
+
+
+// =====================================================
+// Function declarations
+// =====================================================
+
+float getDistance();
+float set_target(float current_distance);
+
+void rotate();
+void forward();
+void stopmotors();
+
+float read_gyroscope();
+void reset_yaw();
 
 
 // =====================================================
@@ -78,38 +123,47 @@ void setup() {
   motor3.setSpeed(200);
   motor4.setSpeed(200);
 
-  Serial.begin(9600);
-
   pinMode(TRIG, OUTPUT);
   pinMode(ECHO, INPUT);
 
   digitalWrite(TRIG, LOW);
 
-  // 10 second delay
+
+  // ---------------------------------------------------
+  // Initialize MPU6050
+  // ---------------------------------------------------
+
+  Wire.begin();
+
+  Wire.beginTransmission(MPU6050);
+  Wire.write(0x6B);
+  Wire.write(0);
+  Wire.endTransmission();
+
+
+  // ---------------------------------------------------
+  // Initial 10 second delay
+  // ---------------------------------------------------
+
   delay(10000);
 
 
-  // ---------------------------------------------
+  // ---------------------------------------------------
+  // Initialize gyro timer
+  // ---------------------------------------------------
+
+  gyroPreviousTime = micros();
+
+
+  // ---------------------------------------------------
   // Measure initial distance
-  // ---------------------------------------------
+  // ---------------------------------------------------
 
   distance = getDistance();
 
   if (distance > 0) {
 
     target = distance - interval;
-
-    Serial.println("================================");
-    Serial.println("ROBOT STARTED");
-    Serial.println("================================");
-
-    Serial.print("Initial distance: ");
-    Serial.print(distance);
-    Serial.println(" cm");
-
-    Serial.print("Goal 1: ");
-    Serial.print(target);
-    Serial.println(" cm");
   }
 
   previousTime = millis();
@@ -165,8 +219,6 @@ float getDistance() {
 
   if (duration == 0) {
 
-    Serial.println("NO ECHO");
-
     return -1;
   }
 
@@ -182,9 +234,92 @@ float getDistance() {
 
 float set_target(float current_distance) {
 
-  target = current_distance - interval;
+  return current_distance - interval;
+}
 
-  return target;
+
+// =====================================================
+// Gyroscope
+// =====================================================
+
+float read_gyroscope() {
+
+  unsigned long currentTime = micros();
+
+  gyroDt = (currentTime - gyroPreviousTime) / 1000000.0;
+
+  gyroPreviousTime = currentTime;
+
+
+  int16_t rawAx, rawAy, rawAz;
+  int16_t rawGx, rawGy, rawGz;
+
+
+  Wire.beginTransmission(MPU6050);
+
+  Wire.write(0x3B);
+
+  Wire.endTransmission(false);
+
+  Wire.requestFrom(MPU6050, 14);
+
+
+  rawAx = Wire.read() << 8 | Wire.read();
+  rawAy = Wire.read() << 8 | Wire.read();
+  rawAz = Wire.read() << 8 | Wire.read();
+
+  // Temperature
+  Wire.read();
+  Wire.read();
+
+  rawGx = Wire.read() << 8 | Wire.read();
+  rawGy = Wire.read() << 8 | Wire.read();
+  rawGz = Wire.read() << 8 | Wire.read();
+
+
+  // ---------------------------------------------------
+  // Convert accelerometer
+  // ---------------------------------------------------
+
+  ax = (rawAx / 16384.0) * 9.81;
+  ay = (rawAy / 16384.0) * 9.81;
+  az = (rawAz / 16384.0) * 9.81;
+
+  az = az - 9.81;
+
+
+  // ---------------------------------------------------
+  // Convert gyroscope
+  // ---------------------------------------------------
+
+  gx = rawGx / 131.0;
+  gy = rawGy / 131.0;
+  gz = rawGz / 131.0;
+
+
+  // ---------------------------------------------------
+  // Integrate yaw
+  // ---------------------------------------------------
+
+  roll  = roll + gx * gyroDt;
+  pitch = pitch + gy * gyroDt;
+
+  yaw = yaw + gz * gyroDt;
+
+
+  return yaw;
+}
+
+
+// =====================================================
+// Reset yaw
+// =====================================================
+
+void reset_yaw() {
+
+  yaw = 0;
+
+  gyroPreviousTime = micros();
 }
 
 
@@ -194,29 +329,101 @@ float set_target(float current_distance) {
 
 void loop() {
 
-  // ---------------------------------------------------
+
+  // ===================================================
   // Measure distance
-  // ---------------------------------------------------
+  // ===================================================
 
   distance = getDistance();
 
 
-  // ---------------------------------------------------
+  // ===================================================
+  // Read gyroscope
+  // ===================================================
+
+  yaw = read_gyroscope();
+
+
+  // ===================================================
   // Invalid ultrasonic reading
-  // ---------------------------------------------------
+  // ===================================================
+
+  if (distance <= 0) {
+
+    stopmotors();
+
+    delay(100);
+
+    return;
+  }
+
+
+  // ===================================================
+  // ROTATION CONDITION
+  // ===================================================
 
   if (distance <= interval) {
 
     stopmotors();
-      
-    delay(5000);
+
+    delay(STOP_TIME);
+
+
+    // -------------------------------------------------
+    // Rotate
+    // -------------------------------------------------
+
     motor1.setSpeed(255);
     motor2.setSpeed(255);
     motor3.setSpeed(255);
     motor4.setSpeed(255);
+
     rotate();
-    delay(1500);
+
+    delay(ROTATE_TIME);
+
     stopmotors();
+
+
+    // -------------------------------------------------
+    // Reset yaw AFTER rotation
+    // -------------------------------------------------
+
+    reset_yaw();
+
+
+    // -------------------------------------------------
+    // Measure distance after rotation
+    // -------------------------------------------------
+
+    delay(200);
+
+    distance = getDistance();
+
+
+    if (distance > 0) {
+
+      // -----------------------------------------------
+      // Set new target
+      // -----------------------------------------------
+
+      target = set_target(distance);
+
+      goal_number++;
+
+
+      // -----------------------------------------------
+      // Reset integral
+      // -----------------------------------------------
+
+      integral = 0.0;
+
+      previousTime = millis();
+
+      target_reached = false;
+    }
+
+    return;
   }
 
 
@@ -226,40 +433,23 @@ void loop() {
 
   if (target_reached) {
 
-    // -----------------------------------------------
-    // Reset integral for new goal
-    // -----------------------------------------------
-
     integral = 0.0;
 
-    // -----------------------------------------------
-    // Create next target
-    // -----------------------------------------------
-
-    target = set_target(distance);
-
-    goal_number++;
-
-    target_reached = false;
-
-    previousTime = millis();
+    distance = getDistance();
 
 
-    Serial.println();
-    Serial.println("================================");
+    if (distance > 0) {
 
-    Serial.print("NEW GOAL: ");
-    Serial.println(goal_number);
+      target = set_target(distance);
 
-    Serial.print("Current distance: ");
-    Serial.print(distance);
-    Serial.println(" cm");
+      goal_number++;
 
-    Serial.print("New target: ");
-    Serial.print(target);
-    Serial.println(" cm");
+      target_reached = false;
 
-    Serial.println("================================");
+      previousTime = millis();
+    }
+
+    return;
   }
 
 
@@ -267,135 +457,161 @@ void loop() {
   // MOVING
   // ===================================================
 
-  if (!target_reached) {
+  // ---------------------------------------------------
+  // Calculate dt
+  // ---------------------------------------------------
 
-    // -----------------------------------------------
-    // Calculate elapsed time
-    // -----------------------------------------------
+  unsigned long currentTime = millis();
 
-    unsigned long currentTime = millis();
+  float dt = (currentTime - previousTime) / 1000.0;
 
-    float dt = (currentTime - previousTime) / 1000.0;
-
-    previousTime = currentTime;
+  previousTime = currentTime;
 
 
-    // -----------------------------------------------
-    // Error to NEXT GOAL
-    // -----------------------------------------------
+  // ---------------------------------------------------
+  // Error to NEXT GOAL
+  // ---------------------------------------------------
 
-    error = distance - target;
-
-
-    // -----------------------------------------------
-    // Integral
-    // -----------------------------------------------
-
-    integral += error * dt;
+  error = distance - target;
 
 
-    // -----------------------------------------------
-    // Anti-windup
-    // -----------------------------------------------
+  // ---------------------------------------------------
+  // Integral
+  // ---------------------------------------------------
 
-    integral = constrain(
-      integral,
-      -INTEGRAL_LIMIT,
-      INTEGRAL_LIMIT
-    );
+  integral += error * dt;
 
 
-    // -----------------------------------------------
-    // PI controller
-    // -----------------------------------------------
+  // ---------------------------------------------------
+  // Anti-windup
+  // ---------------------------------------------------
 
-    float control = Kp * error + Ki * integral;
+  integral = constrain(
+    integral,
+    -INTEGRAL_LIMIT,
+    INTEGRAL_LIMIT
+  );
 
 
-    // -----------------------------------------------
-    // Motor velocity
-    // -----------------------------------------------
+  // ---------------------------------------------------
+  // PI Controller
+  // ---------------------------------------------------
 
-    int velocity = constrain(
+  float control = Kp * error + Ki * integral;
+
+
+  // ---------------------------------------------------
+  // Motor velocity
+  // ---------------------------------------------------
+
+  int velocity;
+
+
+  if (error > 15.0) {
+
+    velocity = 200;
+
+  }
+
+  else {
+
+    velocity = constrain(
       control,
-      55,
+      75,
       MAX_SPEED
     );
+  }
 
 
-    // -----------------------------------------------
-    // Set motor speed
-    // -----------------------------------------------
+  // ===================================================
+  // GYROSCOPE YAW CORRECTION
+  // ===================================================
 
-    motor1.setSpeed(velocity);
-    motor2.setSpeed(velocity);
-    motor3.setSpeed(velocity);
-    motor4.setSpeed(velocity);
+  int leftSpeed = velocity;
+  int rightSpeed = velocity;
 
 
-    // -----------------------------------------------
-    // Move forward
-    // -----------------------------------------------
+  if (yaw > 10.0) {
 
-    forward();
+    // Right wheels +30
+    rightSpeed = velocity + 30;
+  }
 
+  else if (yaw < -10.0) {
 
-    // -----------------------------------------------
-    // Serial monitor
-    // -----------------------------------------------
-
-    Serial.print("Distance: ");
-    Serial.print(distance);
-
-    Serial.print(" cm | Target: ");
-    Serial.print(target);
-
-    Serial.print(" cm | Error: ");
-    Serial.print(error);
-
-    Serial.print(" cm | Integral: ");
-    Serial.print(integral);
-
-    Serial.print(" | Control: ");
-    Serial.print(control);
-
-    Serial.print(" | Velocity: ");
-    Serial.println(velocity);
+    // Left wheels +30
+    leftSpeed = velocity + 30;
+  }
 
 
-    // =================================================
-    // CHECK IF TARGET WAS REACHED
-    // =================================================
+  // ---------------------------------------------------
+  // Limit speeds
+  // ---------------------------------------------------
 
-    if (abs(error) < threshold) {
+  leftSpeed = constrain(
+    leftSpeed,
+    0,
+    MAX_SPEED
+  );
 
-      stopmotors();
-
-      Serial.println();
-      Serial.println("******** TARGET REACHED ********");
-
-      Serial.print("Goal ");
-      Serial.print(goal_number);
-      Serial.println(" reached.");
-
-      Serial.println("Stopping for 5 seconds...");
-
-
-      // -----------------------------------------------
-      // Stop for 5 seconds
-      // -----------------------------------------------
-
-      delay(STOP_TIME);
+  rightSpeed = constrain(
+    rightSpeed,
+    0,
+    MAX_SPEED
+  );
 
 
-      // -----------------------------------------------
-      // Start next goal
-      // -----------------------------------------------
+  // ---------------------------------------------------
+  // Apply motor speeds
+  // ---------------------------------------------------
 
-      target_reached = true;
+  motor1.setSpeed(leftSpeed);
+  motor2.setSpeed(leftSpeed);
 
-      Serial.println("5 seconds completed.");
-      Serial.println("Continuing to next goal...");
+  motor3.setSpeed(rightSpeed);
+  motor4.setSpeed(rightSpeed);
+
+
+  // ---------------------------------------------------
+  // Move forward
+  // ---------------------------------------------------
+
+  forward();
+
+
+  // ===================================================
+  // CHECK IF TARGET WAS REACHED
+  // ===================================================
+
+  if (abs(error) < threshold) {
+
+    stopmotors();
+
+    // -------------------------------------------------
+    // Stop
+    // -------------------------------------------------
+
+    delay(STOP_TIME);
+
+
+    // -------------------------------------------------
+    // Create next target immediately
+    // -------------------------------------------------
+
+    distance = getDistance();
+
+
+    if (distance > 0) {
+
+      target = set_target(distance);
+
+      goal_number++;
+
+      integral = 0.0;
+
+      target_reached = false;
+
+      previousTime = millis();
     }
   }
 
