@@ -76,7 +76,7 @@ void loop() {
     }
 
     if (correction > 0){
-      correction = correction*1.5;
+      correction = correction*1.7;
     }
 
     if (motors_on) {
